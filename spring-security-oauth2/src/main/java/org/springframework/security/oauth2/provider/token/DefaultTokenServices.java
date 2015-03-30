@@ -18,6 +18,8 @@ import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.oauth2.common.DefaultExpiringOAuth2RefreshToken;
 import org.springframework.security.oauth2.common.DefaultOAuth2AccessToken;
@@ -34,6 +36,7 @@ import org.springframework.security.oauth2.provider.ClientRegistrationException;
 import org.springframework.security.oauth2.provider.OAuth2Authentication;
 import org.springframework.security.oauth2.provider.OAuth2Request;
 import org.springframework.security.oauth2.provider.TokenRequest;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationToken;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
 
@@ -49,7 +52,6 @@ import org.springframework.util.Assert;
  * @author Luke Taylor
  * @author Dave Syer
  */
-@Transactional
 public class DefaultTokenServices implements AuthorizationServerTokenServices, ResourceServerTokenServices,
 		ConsumerTokenServices, InitializingBean {
 
@@ -67,6 +69,8 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 
 	private TokenEnhancer accessTokenEnhancer;
 
+	private AuthenticationManager authenticationManager;
+
 	/**
 	 * Initialize these token services. If no random generator is set, one will be created.
 	 */
@@ -74,6 +78,7 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 		Assert.notNull(tokenStore, "tokenStore must be set");
 	}
 
+	@Transactional
 	public OAuth2AccessToken createAccessToken(OAuth2Authentication authentication) throws AuthenticationException {
 
 		OAuth2AccessToken existingAccessToken = tokenStore.getAccessToken(authentication);
@@ -124,6 +129,7 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 
 	}
 
+	@Transactional(noRollbackFor={InvalidTokenException.class, InvalidGrantException.class})
 	public OAuth2AccessToken refreshAccessToken(String refreshTokenValue, TokenRequest tokenRequest)
 			throws AuthenticationException {
 
@@ -137,6 +143,15 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 		}
 
 		OAuth2Authentication authentication = tokenStore.readAuthenticationForRefreshToken(refreshToken);
+		if (this.authenticationManager != null && !authentication.isClientOnly()) {
+			// The client has already been authenticated, but the user authentication might be old now, so give it a
+			// chance to re-authenticate.
+			Authentication user = new PreAuthenticatedAuthenticationToken(authentication.getUserAuthentication(), "", authentication.getAuthorities());
+			user = authenticationManager.authenticate(user);
+			Object details = authentication.getDetails();
+			authentication = new OAuth2Authentication(authentication.getOAuth2Request(), user);
+			authentication.setDetails(details);
+		}
 		String clientId = authentication.getOAuth2Request().getClientId();
 		if (clientId == null || !clientId.equals(tokenRequest.getClientId())) {
 			throw new InvalidGrantException("Wrong client for this refresh token: " + refreshTokenValue);
@@ -151,7 +166,7 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 			throw new InvalidTokenException("Invalid refresh token (expired): " + refreshToken);
 		}
 
-		authentication = createRefreshedAuthentication(authentication, tokenRequest.getScope());
+		authentication = createRefreshedAuthentication(authentication, tokenRequest);
 
 		if (!reuseRefreshToken) {
 			tokenStore.removeRefreshToken(refreshToken);
@@ -178,20 +193,21 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 	 * @return The refreshed authentication.
 	 * @throws InvalidScopeException If the scope requested is invalid or wider than the original scope.
 	 */
-	private OAuth2Authentication createRefreshedAuthentication(OAuth2Authentication authentication, Set<String> scope) {
+	private OAuth2Authentication createRefreshedAuthentication(OAuth2Authentication authentication, TokenRequest request) {
 		OAuth2Authentication narrowed = authentication;
+		Set<String> scope = request.getScope();
+		OAuth2Request clientAuth = authentication.getOAuth2Request().refresh(request);
 		if (scope != null && !scope.isEmpty()) {
-			OAuth2Request clientAuth = authentication.getOAuth2Request();
 			Set<String> originalScope = clientAuth.getScope();
 			if (originalScope == null || !originalScope.containsAll(scope)) {
 				throw new InvalidScopeException("Unable to narrow the scope of the client authentication to " + scope
 						+ ".", originalScope);
 			}
 			else {
-				narrowed = new OAuth2Authentication(clientAuth.narrowScope(scope),
-						authentication.getUserAuthentication());
+				clientAuth = clientAuth.narrowScope(scope);
 			}
 		}
+		narrowed = new OAuth2Authentication(clientAuth, authentication.getUserAuthentication());
 		return narrowed;
 	}
 
@@ -340,7 +356,8 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 	}
 
 	/**
-	 * The validity (in seconds) of the refresh token. If less than or equal to zero then the tokens will be non-expiring.
+	 * The validity (in seconds) of the refresh token. If less than or equal to zero then the tokens will be
+	 * non-expiring.
 	 * 
 	 * @param refreshTokenValiditySeconds The validity (in seconds) of the refresh token.
 	 */
@@ -384,6 +401,16 @@ public class DefaultTokenServices implements AuthorizationServerTokenServices, R
 	 */
 	public void setTokenStore(TokenStore tokenStore) {
 		this.tokenStore = tokenStore;
+	}
+
+	/**
+	 * An authentication manager that will be used (if provided) to check the user authentication when a token is
+	 * refreshed.
+	 * 
+	 * @param authenticationManager the authenticationManager to set
+	 */
+	public void setAuthenticationManager(AuthenticationManager authenticationManager) {
+		this.authenticationManager = authenticationManager;
 	}
 
 	/**

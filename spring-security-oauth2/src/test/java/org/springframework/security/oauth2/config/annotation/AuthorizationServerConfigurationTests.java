@@ -41,6 +41,11 @@ import org.springframework.http.HttpMethod;
 import org.springframework.mock.web.MockServletContext;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.annotation.web.servlet.configuration.EnableWebMvcSecurity;
+import org.springframework.security.core.authority.AuthorityUtils;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.oauth2.config.annotation.configurers.ClientDetailsServiceConfigurer;
 import org.springframework.security.oauth2.config.annotation.web.configuration.AuthorizationServerConfigurerAdapter;
@@ -100,7 +105,8 @@ public class AuthorizationServerConfigurationTests {
 				new Object[] { null, new Class<?>[] { AuthorizationServerCustomClientDetails.class } },
 				new Object[] { null, new Class<?>[] { AuthorizationServerAllowsSpecificRequestMethods.class} },
 				new Object[] { null, new Class<?>[] { AuthorizationServerAllowsOnlyPost.class} },
-				new Object[] { BeanCreationException.class,	new Class<?>[] { AuthorizationServerTypes.class } }
+				new Object[] { BeanCreationException.class, new Class<?>[] { AuthorizationServerTypes.class } },
+				new Object[] { null, new Class<?>[] { AuthorizationServerCustomGranter.class } }
 				// @formatter:on
 				);
 	}
@@ -553,6 +559,33 @@ public class AuthorizationServerConfigurationTests {
 
 	@Configuration
 	@EnableWebMvcSecurity
+	@EnableAuthorizationServer
+	protected static class AuthorizationServerCustomGranter extends
+			AuthorizationServerConfigurerAdapter implements Runnable {
+
+		@Autowired
+		private ApplicationContext context;
+
+		@Override
+		public void configure(AuthorizationServerEndpointsConfigurer endpoints)
+				throws Exception {
+			endpoints.tokenGranter(new ClientCredentialsTokenGranter(endpoints
+					.getDefaultAuthorizationServerTokenServices(), endpoints
+					.getClientDetailsService(), endpoints.getOAuth2RequestFactory()));
+		}
+
+		@Override
+		public void run() {
+			assertTrue(ReflectionTestUtils.getField(
+					context.getBean(TokenEndpoint.class), "tokenGranter") instanceof ClientCredentialsTokenGranter);
+		}
+
+	}
+
+	@Configuration
+	@EnableWebMvcSecurity
+	@EnableAuthorizationServer
+	// Stuff that can't be autowired
 	protected static class AuthorizationServerTypes extends AuthorizationServerConfigurerAdapter {
 
 		@Autowired
@@ -566,8 +599,6 @@ public class AuthorizationServerConfigurationTests {
 
 		@Override
 		public void configure(AuthorizationServerEndpointsConfigurer endpoints) throws Exception {
-			endpoints.tokenGranter(new ClientCredentialsTokenGranter(tokenServices, clientDetailsService,
-					requestFactory));
 		}
 
 	}
@@ -589,6 +620,37 @@ public class AuthorizationServerConfigurationTests {
 		@Override
 		public void run() {
 			assertNotNull(context.getBean(ClientDetailsService.class));
+		}
+
+	}
+
+	@Configuration
+	@EnableWebMvcSecurity
+	@EnableAuthorizationServer
+	protected static class AuthorizationServerCustomUserDetails extends AuthorizationServerConfigurerAdapter
+			implements Runnable {
+
+		@Autowired
+		private ApplicationContext context;
+		
+		@Override
+		public void configure(AuthorizationServerEndpointsConfigurer endpoints) throws Exception {
+			endpoints.userDetailsService(userDetailsService());
+		}
+
+		private UserDetailsService userDetailsService() {
+			return new UserDetailsService() {
+				
+				@Override
+				public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+					return new User(username, "", AuthorityUtils.commaSeparatedStringToAuthorityList("ROLE_USER"));
+				}
+			};
+		}
+
+		@Override
+		public void run() {
+			assertNotNull(context.getBean(UserDetailsService.class));
 		}
 
 	}
